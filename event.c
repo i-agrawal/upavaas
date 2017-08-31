@@ -1,4 +1,5 @@
 #include "event.h"
+#include "config.h"
 #include <sys/socket.h>
 #include <stdio.h>
 #include <fcntl.h>
@@ -9,31 +10,22 @@
 #include <signal.h>
 
 
-#if defined(linux) || defined(__linux) || defined(__linux__)
-#define __linuxos__
-#elif defined(macintosh) || (defined(__APPLE__) || defined(__MACH__)) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || defined(__bsdi__) || defined(__DragonFly__)
-#define __bsdos__
-#elif defined(unix) || defined(__unix) || defined(__unix__)
-#define __unixos__
-#error "non-linux/non-bsd systems not support yet"
-#else
-#error "non-linux/non-bsd systems not supported yet"
-#endif
-
-#ifdef __linuxos__
+#if defined(__linuxos__)
 #include <sys/epoll.h>
 // for epoll
 int epollfd;
 struct epoll_event* evs;
 int evsz;
-#endif
-
-#ifdef __bsdos__
+#elif defined(__bsdos__)
 #include <sys/event.h>
 // for kqueue
 int kq;
 struct kevent* evs;
 int evsz;
+#elif defined(__unixos__)
+#include <sys/select.h>
+// for select
+fd_set fdset;
 #endif
 
 // for file descriptors
@@ -134,7 +126,6 @@ startsvr(uint32_t addr, uint16_t port)
   return svrfd;
 }
 
-#ifdef __linuxos__
 void
 evclean(int sig)
 {
@@ -152,16 +143,25 @@ evclean(int sig)
     }
     free(fds);
   }
+  #if defined(__linuxos__)
   close(epollfd);
+  #elif defined(__bsdos__)
+  close(kq);
+  #else
+  FD_ZERO(&fdset);
+  #endif
   if (buffer != 0) {
     free(buffer);
   }
+  #if defined(__linuxos__) || defined(__bsdos__)
   if (evs != 0) {
     free(evs);
   }
+  #endif
   exit(0);
 }
 
+#if defined(__linuxos__)
 int
 initevl(void)
 {
@@ -227,6 +227,7 @@ startevl(void)
         ret = fcntl(fd, F_SETFL, O_NONBLOCK);
         if (ret == -1) {
           perror("fcntl");
+          close(fd);
           goto failure;
         }
 
@@ -292,36 +293,7 @@ startevl(void)
   }
   return -1;
 }
-#endif
-
-#ifdef __bsdos__
-void
-evclean(int sig)
-{
-  if (sig == SIGINT) {
-    printf("interrupt signal received: cleaning up\n");
-  }
-  else {
-    printf("termination signal received: cleaning up\n");
-  }
-  
-  close(kq);
-  if (buffer != 0) {
-    free(buffer);
-  }
-  if (evs != 0) {
-    free(evs);
-  }
-  if (fds != 0) {
-    int i;
-    for (i = 0; i != sz; i++) {
-      close(fds[i]);
-    }
-    free(fds);
-  }
-  exit(0);
-}
-
+#elif defined(__bsdos__)
 int
 initevl(void)
 {
@@ -428,9 +400,6 @@ startevl(void)
     }
   }
 
-  // should never get here
-  return 0;
-
   failure:
   close(kq);
   if (buffer != 0) {
@@ -439,6 +408,99 @@ startevl(void)
   if (evs != 0) {
     free(evs);
   }
+  if (fds != 0) {
+    for (i = 0; i != sz; i++) {
+      close(fds[i]);
+    }
+    free(fds);
+  }
+  return -1;
+}
+#elif defined(__unixos__)
+int
+initevl(void)
+{
+  FD_ZERO(&fdset);
+  FD_SET(fds[0], &fdset);
+  return 0;
+}
+
+int
+startevl(void)
+{
+  buffer = 0;
+  buffer = (char*)malloc(buflen);
+  if (buffer == 0) {
+    perror("malloc");
+    goto failure;
+  }
+
+  struct sockaddr_in address;
+  socklen_t len;
+  int i, nevs, fd, ret, tsz;
+  fd_set readfds;
+  uint8_t* addrptr = (uint8_t*)&(address.sin_addr.s_addr);
+  FD_ZERO(&readfds);
+  while (1) {
+    tsz = sz;
+    readfds = fdset;
+    ret = select(FD_SETSIZE, &readfds, 0, 0, 0);
+    if (ret == -1) {
+      perror("select");
+      goto failure;
+    }
+    if (FD_ISSET(fds[0], &readfds)) {
+      len = sizeof(struct sockaddr_in);
+      fd = accept(fds[0], (struct sockaddr*)&address, &len);
+      if (fd == -1) {
+        perror("accept");
+        goto failure;
+      }
+      ret = fcntl(fd, F_SETFL, O_NONBLOCK);
+      if (ret == -1) {
+        perror("fcntl");
+        close(fd);
+        goto failure;
+      }
+      FD_SET(fd, &fdset);
+      ret = push_back(fd);
+      if (ret == -1) {
+        close(fd);
+        goto failure;
+      }
+      printf("new connection %hhu.%hhu.%hhu.%hhu:%hu\n", addrptr[0], addrptr[1], addrptr[2], addrptr[3], ntohs(address.sin_port));
+    }
+    for (i = 1; i != tsz; i++) {
+      if (FD_ISSET(fds[i], &readfds)) {
+        ret = read(fds[i], buffer, buflen);
+        if (ret == -1) {
+          perror("read");
+          goto failure;
+        }
+        if (ret == 0) {
+          fd = fds[i];
+          close(fd);
+          FD_CLR(fd, &fdset);
+          ret = delete(fd);
+          if (ret == -1) {
+            goto failure;
+          }
+          printf("diconnect\n");
+        }
+        else {
+          printf("connection said:\n%s\n", buffer);
+        }
+      }
+    }
+  }
+
+  failure:
+  printf("shutting down\n");
+  if (buffer != 0) {
+    free(buffer);
+  }
+  FD_ZERO(&fdset);
+  FD_ZERO(&readfds);
   if (fds != 0) {
     for (i = 0; i != sz; i++) {
       close(fds[i]);

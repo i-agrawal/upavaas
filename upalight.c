@@ -43,16 +43,19 @@ main(int argc, char** argv)
   if (ret == -1) {
     return EXIT_FAILURE;
   }
+  printf("server started\n");
 
   ret = initevl();
   if (ret == -1) {
     return EXIT_FAILURE;
   }
+  printf("event listening started\n");
 
   ret = startevl();
   if (ret == -1) {
     return EXIT_FAILURE;
   }
+  printf("event listening ended\n");
 
   return 0;
 }

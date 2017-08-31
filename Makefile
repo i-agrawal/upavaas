@@ -1,18 +1,7 @@
-ifeq ($(OS),Windows_NT)
-$(error "windows not supported")
-else
-UNAME_OS := $(shell uname -s)
-ifeq ($(UNAME_OS),Linux)
-LDFLAGS := -pthread
-else
-LDFLAGS := -lpthread
-endif
-endif
-
 FILES := upalight options event
 OBJECTS := $(addsuffix .o,$(FILES))
 BINARY := upald
-CFLAGS ?= -O2
+CFLAGS ?= -O2 -g
 
 define genrule
 $1.o: $1.c $1.h
